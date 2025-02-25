@@ -23,12 +23,26 @@
 /***        Include files                                                 ***/
 /****************************************************************************/
 
-#include <windows.h>
+//#include <windows.h>
 #include <stdio.h>
-#include <winsock.h>
+#include <stdlib.h>
+//#include <winsock.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+
 #include <getopt.h>
 #include <errno.h>
-#include "uart.h"
+#include <string.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <netinet/in.h>
+#include <unistd.h>
+#include <fcntl.h>
+
+#include <errno.h>
+#include <termios.h>
+#include <sys/select.h>
+
 
 /****************************************************************************/
 /***        Macro Definitions                                             ***/
@@ -114,11 +128,11 @@ typedef struct
 
 typedef struct
 {
-	volatile boolean	bExitRequest;
-	volatile boolean	bExit;
-	boolean				bVerbose;
-	boolean				bSilent;
-	boolean				bDebug;
+	volatile bool	bExitRequest;
+	volatile bool	bExit;
+	bool				bVerbose;
+	bool				bSilent;
+	bool				bDebug;
 	teState				eState;
 	char				*pstrSerialPort;
 	int					iBaudRate;
@@ -126,7 +140,7 @@ typedef struct
 	char				*pstrIpAddress;
 	int					iPort;
 	char				*pstrSnifferId;
-	HANDLE				hUartHandle;
+	int					hUartHandle;
 	int					iPacketsSniffed;
 } tsInstance;
 
@@ -135,12 +149,14 @@ typedef struct
 /****************************************************************************/
 
 static void vParseCommandLineOptions(tsInstance *psInstance, int argc, char *argv[]);
-static BOOL WINAPI bCtrlHandler(DWORD dwCtrlType);
 static teStatus eReadMessage(tsInstance *psInstance, tsMessage *psMessage);
 static teStatus eWriteMessage(tsInstance *psInstance, tsMessage *psMessage);
 static teStatus eReadFromUart(tsInstance *psInstance, int iTimeoutMilliseconds, int iBytesExpected, uint8_t *pu8Buffer, int *piBytesRead);
 static teStatus eWriteToUart(tsInstance *psInstance, int iLength, uint8_t *pu8Data);
 static uint8_t u8CalculateChecksum(uint8_t *pu8Message);
+int set_interface_attribs (int fd, int speed, int parity);
+void set_blocking (int fd, int should_block);
+
 
 /****************************************************************************/
 /***        Exported Variables                                            ***/
@@ -173,8 +189,6 @@ int main(int argc, char *argv[])
 	struct sockaddr_in si_other;
 	int slen = sizeof(si_other);
 
-    WSADATA wsaData;
-
     tsMessage sMessage;
     uint8_t au8MessageBuffer[255];
     int iOffset;
@@ -192,10 +206,10 @@ int main(int argc, char *argv[])
 		   "+----------------------------------------------------------------------+\n\n");
 
 	/* Initialise application state and set some defaults */
-	sInstance.bExit = FALSE;
-	sInstance.bVerbose = FALSE;
-	sInstance.bSilent = FALSE;
-	sInstance.bDebug = FALSE;
+	sInstance.bExit = false;
+	sInstance.bVerbose = false;
+	sInstance.bSilent = false;
+	sInstance.bDebug = false;
 	sInstance.eState = E_STATE_SET_CHANNEL;
 	sInstance.pstrSerialPort = NULL;
 	sInstance.iBaudRate = 1000000;
@@ -207,8 +221,6 @@ int main(int argc, char *argv[])
 
 	memset(&sMessage, 0, sizeof(tsMessage));
 
-    SetConsoleCtrlHandler(bCtrlHandler, TRUE);
-
     /* Parse the command line options */
     vParseCommandLineOptions(&sInstance, argc, argv);
 
@@ -216,7 +228,6 @@ int main(int argc, char *argv[])
     if(sInstance.pstrSerialPort == NULL)
     {
     	printf("Error: No serial port specified\n");
-		UART_vListPorts();
     	exit(EXIT_FAILURE);
     }
 
@@ -234,15 +245,20 @@ int main(int argc, char *argv[])
 	}
 
     /* Try and open the comm port */
-	if(UART_bOpen(&sInstance.hUartHandle, sInstance.pstrSerialPort, 1000000) == FALSE)
+	sInstance.hUartHandle = open (sInstance.pstrSerialPort, O_RDWR | O_NOCTTY | O_SYNC);
+	//if(UART_bOpen(&sInstance.hUartHandle, sInstance.pstrSerialPort, 1000000) == FALSE)
+	if (sInstance.hUartHandle<0)
 	{
 		printf("Error: Failed to open the serial port!\n");
-		UART_vListPorts();
 		exit(EXIT_FAILURE);
 	}
+	printf("OK: serial port opened %d!\n",sInstance.hUartHandle );
+	set_interface_attribs ( sInstance.hUartHandle, B1000000, 0);
+	//set_blocking (sInstance.hUartHandle, 0);
+
 
 	/* Create the socket */
-    WSAStartup(MAKEWORD(2, 2), &wsaData);
+    
     udp_socket = socket(PF_INET, SOCK_DGRAM, IPPROTO_UDP);
 	if (udp_socket < 0) {
 		printf("Error: Can't create UDP socket\n");
@@ -253,7 +269,8 @@ int main(int argc, char *argv[])
 	memset((char *) &si_other, 0, sizeof(si_other));
 	si_other.sin_family = AF_INET;
 	si_other.sin_port = htons(sInstance.iPort);
-	si_other.sin_addr.S_un.S_addr = inet_addr(sInstance.pstrIpAddress);
+	//si_other.sin_addr.S_un.S_addr = inet_addr(sInstance.pstrIpAddress);
+	inet_pton(AF_INET, sInstance.pstrIpAddress, &si_other.sin_addr);
 
 	printf("Starting on port %s at %d baud\nSniffing on channel %d\nSending to %s:%d\n", sInstance.pstrSerialPort,
 			sInstance.iBaudRate,
@@ -471,7 +488,7 @@ int main(int argc, char *argv[])
 			break;
 
 		case E_STATE_EXIT:
-			sInstance.bExit = TRUE;
+			sInstance.bExit = true;
 			break;
 
     	}
@@ -479,15 +496,14 @@ int main(int argc, char *argv[])
     	if(sInstance.bExitRequest)
     	{
 			sInstance.eState = E_STATE_TURN_RX_OFF;
-			sInstance.bExitRequest = FALSE;
+			sInstance.bExitRequest = false;
     	}
 
     }
 
     /* Tidy up and then exit */
-    UART_bClose(sInstance.hUartHandle);
-	closesocket(udp_socket);
-	WSACleanup();
+	close (sInstance.hUartHandle);
+    close(udp_socket);
 	
 	printf("Shutdown complete\n");
 	
@@ -574,18 +590,18 @@ static void vParseCommandLineOptions(tsInstance *psInstance, int argc, char *arg
 
 		case 'v':
 			printf("Verbose mode enabled\n");
-			psInstance->bVerbose = TRUE;
+			psInstance->bVerbose = true;
 			break;
 
 		case 'q':
 			printf("Quiet mode enabled\n");
-			psInstance->bSilent = TRUE;
+			psInstance->bSilent = true;
 			break;
 
 		case 'd':
 			printf("Debug mode enabled\n");
-			psInstance->bVerbose = TRUE;
-			psInstance->bDebug = TRUE;
+			psInstance->bVerbose = true;
+			psInstance->bDebug = true;
 			break;
 
         case '?':
@@ -614,37 +630,6 @@ static void vParseCommandLineOptions(tsInstance *psInstance, int argc, char *arg
 }
 
 
-/****************************************************************************
- *
- * NAME: bCtrlHandler
- *
- * DESCRIPTION:
- * Handles Ctrl+C events
- *
- * RETURNS:
- * BOOL
- *
- ****************************************************************************/
-static BOOL WINAPI bCtrlHandler(DWORD dwCtrlType)
-{
-    switch (dwCtrlType)
-    {
-
-    case CTRL_C_EVENT:
-    case CTRL_SHUTDOWN_EVENT:
-        printf("\nExit requested\n");
-        sInstance.bExitRequest = TRUE;
-        return TRUE;
-
-    case CTRL_BREAK_EVENT:
-        printf("\nImmediate exit requested\n");
-        sInstance.bExit = TRUE;
-    	return TRUE;
-
-    default:
-        return FALSE;
-    }
-}
 
 
 /****************************************************************************
@@ -803,7 +788,8 @@ static teStatus eWriteMessage(tsInstance *psInstance, tsMessage *psMessage)
 	au8Buffer[au8Buffer[2] + 1] = u8CalculateChecksum(au8Buffer);
 	au8Buffer[au8Buffer[2] + 2] = 0x04;
 
-	UART_vFlush(psInstance->hUartHandle);
+	tcflush(sInstance.hUartHandle,TCIOFLUSH);
+
 
 	/* Write message */
 	if(eWriteToUart(psInstance, au8Buffer[2] + 3, au8Buffer) != E_STATUS_OK)
@@ -830,7 +816,7 @@ static teStatus eWriteMessage(tsInstance *psInstance, tsMessage *psMessage)
 static teStatus eReadFromUart(tsInstance *psInstance, int iTimeoutMilliseconds, int iBytesExpected, uint8_t *pu8Buffer, int *piBytesRead)
 {
 
-	DWORD dwBytesRead = 0;
+	ssize_t  dwBytesRead = 0;
 	teStatus eStatus = E_STATUS_OK;
 
     if(pu8Buffer == NULL)
@@ -840,10 +826,46 @@ static teStatus eReadFromUart(tsInstance *psInstance, int iTimeoutMilliseconds, 
 
     *piBytesRead = 0;
 
-    if(UART_bReadWithTimeout(psInstance->hUartHandle, &pu8Buffer[*piBytesRead], iBytesExpected, iTimeoutMilliseconds, &dwBytesRead) != TRUE)
-    {
-    	eStatus = E_STATUS_ERROR_TIMEOUT;
-    }
+/*	dwBytesRead = read (psInstance->hUartHandle, &pu8Buffer[*piBytesRead], iBytesExpected);
+		eStatus = (iBytesExpected == dwBytesRead);*/
+			
+	// Initialize file descriptor sets
+	fd_set read_fds, write_fds, except_fds;
+	FD_ZERO(&read_fds);
+	FD_ZERO(&write_fds);
+	FD_ZERO(&except_fds);
+	FD_SET(psInstance->hUartHandle, &read_fds);
+
+	// Set timeout to 1.0 seconds
+	struct timeval timeout;
+	timeout.tv_sec = 0;
+	timeout.tv_usec = iTimeoutMilliseconds * 1000;
+
+	// Wait for input to become ready or until the time out; the first parameter is
+	// 1 more than the largest file descriptor in any of the sets
+	if (select(psInstance->hUartHandle + 1, &read_fds, &write_fds, &except_fds, &timeout) == 1)
+	{
+		dwBytesRead = read (psInstance->hUartHandle, &pu8Buffer[*piBytesRead], iBytesExpected);
+		if (iBytesExpected == dwBytesRead){
+			eStatus = E_STATUS_OK;
+		}	
+		if(psInstance->bDebug)
+		{
+			printf("Read %d : ",eStatus);
+			for(int n = 0; n < dwBytesRead; n++)
+			{
+				printf(" %02x", pu8Buffer[n]);
+			}
+			printf("\n");
+		}
+
+	}
+	else
+	{
+		eStatus = E_STATUS_ERROR_TIMEOUT;
+	}
+
+
 
 	*piBytesRead = (int)dwBytesRead;
 
@@ -867,7 +889,8 @@ static teStatus eWriteToUart(tsInstance *psInstance, int iLength, uint8_t *pu8Da
 	int n;
 
 	/* Write message */
-	if(UART_bWriteBytes(psInstance->hUartHandle, pu8Data, iLength) == FALSE)
+	if ( write (psInstance->hUartHandle, pu8Data, iLength) < 0)
+	//if(UART_bWriteBytes(psInstance->hUartHandle, pu8Data, iLength) == false)
 	{
 		printf("Error writing to UART\n");
 		return E_STATUS_ERROR_WRITING;
@@ -923,6 +946,66 @@ static uint8_t u8CalculateChecksum(uint8_t *pu8Message)
 	return u8Checksum;
 
 }
+
+
+int
+set_interface_attribs (int fd, int speed, int parity)
+{
+        struct termios tty;
+        if (tcgetattr (fd, &tty) != 0)
+        {
+                printf ("error %d from tcgetattr", errno);
+                return -1;
+        }
+
+        cfsetospeed (&tty, speed);
+        cfsetispeed (&tty, speed);
+
+        tty.c_cflag = (tty.c_cflag & ~CSIZE) | CS8;     // 8-bit chars
+        // disable IGNBRK for mismatched speed tests; otherwise receive break
+        // as \000 chars
+        tty.c_iflag &= ~IGNBRK;         // disable break processing
+        tty.c_lflag = 0;                // no signaling chars, no echo,
+                                        // no canonical processing
+        tty.c_oflag = 0;                // no remapping, no delays
+        tty.c_cc[VMIN]  = 0;            // read doesn't block
+        tty.c_cc[VTIME] = 5;            // 0.5 seconds read timeout
+
+        tty.c_iflag &= ~(IXON | IXOFF | IXANY); // shut off xon/xoff ctrl
+
+        tty.c_cflag |= (CLOCAL | CREAD);// ignore modem controls,
+                                        // enable reading
+        tty.c_cflag &= ~(PARENB | PARODD);      // shut off parity
+        tty.c_cflag |= parity;
+        tty.c_cflag &= ~CSTOPB;
+        tty.c_cflag &= ~CRTSCTS;
+
+        if (tcsetattr (fd, TCSANOW, &tty) != 0)
+        {
+                printf ("error %d from tcsetattr", errno);
+                return -1;
+        }
+        return 0;
+}
+
+void
+set_blocking (int fd, int should_block)
+{
+        struct termios tty;
+        memset (&tty, 0, sizeof tty);
+        if (tcgetattr (fd, &tty) != 0)
+        {
+                printf ("error %d from tggetattr", errno);
+                return;
+        }
+
+        tty.c_cc[VMIN]  = should_block ? 1 : 0;
+        tty.c_cc[VTIME] = 5;            // 0.5 seconds read timeout
+
+        if (tcsetattr (fd, TCSANOW, &tty) != 0)
+                printf ("error %d setting term attributes", errno);
+}
+
 
 /****************************************************************************/
 /***        END OF FILE                                                   ***/

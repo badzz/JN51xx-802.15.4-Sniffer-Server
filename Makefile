@@ -19,12 +19,12 @@
 # 
 ############################################################################
 
-TARGET=JN51xx-802.15.4-Sniffer-Server.exe
+TARGET=JN51xx-802.15.4-Sniffer-Server
 
 CC=gcc
 
 all:
-	$(CC) -o $(TARGET) main.c uart.c -lws2_32
+	$(CC) -o $(TARGET) main.c 
 	
 clean:
 	rm -rf $(TARGET)
