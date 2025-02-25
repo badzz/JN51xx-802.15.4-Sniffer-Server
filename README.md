@@ -1,3 +1,5 @@
+This is a Fork to have a linux version
+
 This application is used to form a connection between a packet sniffer application such as Wireshark (which has built in support for this sniffer-server)
 and an NXP Wireless 802.15.4 Microcontroller running NXP's sniffer firmware connected to a PC's serial port.
 
